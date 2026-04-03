@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "section": "auth",
+      "name": "Регистрация нового пользователя",
+      "task": "TC-01 Проверить успешную регистрацию с валидными данными: заполнить поля имя, email, пароль — убедиться что аккаунт создан и выполнен редирект на главную страницу",
+      "prompt_hint": "Поля: data-testid=name-input, data-testid=email-input, data-testid=password-input. Кнопка: data-testid=register-button. После регистрации редирект на /dashboard"
+    },
+    {
+      "section": "auth",
+      "name": "Вход в аккаунт",
+      "task": "TC-02 Авторизация с корректными учётными данными — успешный вход и редирект на главную страницу",
+      "prompt_hint": "Страница: /login. Поля: data-testid=email-input, data-testid=password-input. Кнопка: data-testid=login-button. После входа редирект на /dashboard"
+    },
+    {
+      "section": "auth",
+      "name": "Блокировка после невалидного пароля",
+      "task": "TC-03 Убедиться что система блокирует вход после 5 неверных попыток ввода пароля — появляется сообщение о блокировке аккаунта",
+      "prompt_hint": "Поля: data-testid=email-input, data-testid=password-input. Кнопка: data-testid=login-button. Ошибка: data-testid=error-message. Баннер блокировки: data-testid=account-locked-banner"
+    },
+    {
+      "section": "catalog",
+      "name": "Поиск товара по ключевому слову",
+      "task": "TC-04 Ввести запрос в строку поиска и проверить релевантность выдачи результатов — результаты содержат введённое ключевое слово",
+      "prompt_hint": "Поиск: data-testid=search-input. Кнопка: data-testid=search-button. Список результатов: data-testid=search-results. Карточка товара: data-testid=product-card"
+    },
+    {
+      "section": "catalog",
+      "name": "Фильтрация результатов поиска",
+      "task": "TC-05 Применить фильтры по цене, бренду и рейтингу — убедиться что выборка соответствует заданным критериям фильтрации",
+      "prompt_hint": "Фильтр цены: data-testid=filter-price. Фильтр бренда: data-testid=filter-brand. Фильтр рейтинга: data-testid=filter-rating. Кнопка применить: data-testid=apply-filters. Счётчик результатов: data-testid=results-count"
+    },
+    {
+      "section": "catalog",
+      "name": "Отображение карточки товара",
+      "task": "TC-06 Открыть карточку товара и проверить наличие всех обязательных элементов: фото, цена, рейтинг, кнопка Добавить в корзину",
+      "prompt_hint": "Фото товара: data-testid=product-image. Цена: data-testid=product-price. Рейтинг: data-testid=product-rating. Кнопка: data-testid=add-to-cart"
+    },
+    {
+      "section": "cart",
+      "name": "Добавление товара в корзину",
+      "task": "TC-07 Нажать кнопку Add to Cart на карточке товара — товар должен появиться в корзине с правильным количеством и обновить счётчик",
+      "prompt_hint": "Кнопка добавить: data-testid=add-to-cart. Счётчик корзины: data-testid=cart-count. Иконка корзины: data-testid=cart-icon. Список товаров в корзине: data-testid=cart-item"
+    },
+    {
+      "section": "cart",
+      "name": "Изменение количества товара в корзине",
+      "task": "TC-08 Обновить количество позиции в корзине — убедиться что итоговая сумма пересчитывается корректно",
+      "prompt_hint": "Поле количества: data-testid=quantity-input. Кнопка обновить: data-testid=update-quantity. Итоговая сумма: data-testid=cart-total. Цена позиции: data-testid=item-subtotal"
+    },
+    {
+      "section": "cart",
+      "name": "Удаление товара из корзины",
+      "task": "TC-09 Удалить позицию из корзины — товар исчезает из списка, итоговая сумма пересчитывается. При удалении последнего товара отображается сообщение о пустой корзине",
+      "prompt_hint": "Кнопка удалить: data-testid=remove-item. Итого: data-testid=cart-total. Сообщение пустой корзины: data-testid=empty-cart-message"
+    },
+    {
+      "section": "checkout",
+      "name": "Оформление заказа",
+      "task": "TC-10 Пройти полный флоу оформления заказа: корзина → адрес доставки → оплата → страница подтверждения с номером заказа",
+      "prompt_hint": "Кнопка перейти к оформлению: data-testid=checkout-button. Форма адреса: data-testid=checkout-step-address. Форма оплаты: data-testid=checkout-step-payment. Кнопка подтвердить: data-testid=place-order-button. Страница подтверждения: data-testid=order-confirmation. Номер заказа: data-testid=order-number"
+    }
+  ]
+}

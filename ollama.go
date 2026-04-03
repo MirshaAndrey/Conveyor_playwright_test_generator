@@ -29,10 +29,6 @@ type OllamaTagsResponse struct {
 	} `json:"models"`
 }
 
-// ─── Системный промпт ────────────────────────────────────────────────────────
-
-const systemPrompt = `Ты — senior QA Automation инженер. Генерируй production-ready Playwright тесты. Требования: TypeScript, Playwright Test, test.describe + test, переиспользуемый код. Селекторы: используй getByTestId (предпочтительно), getByRole (с name), getByLabel; избегай XPath, nth-child и нестабильных селекторов. Логика: каждый шаг чеклиста → действие + проверка; после каждого действия добавляй expect; проверяй UI состояние (visible, enabled, text). Умные допущения: если нет селекторов — генерируй логичные data-testid (login-button, submit-form) и имитируй реальный пользовательский сценарий. Анти-паттерны (запрещено): waitForTimeout, console.log, пустые тесты, TODO, невалидный код. Качество: код должен быть сразу исполняемым, без синтаксических ошибок и без «примеров» — только реальный код. Контекст страницы: {{context}} Чеклист: {{input}}`
-
 // ─── Подключение и модели ─────────────────────────────────────────────────────
 
 func checkOllama(baseURL string) error {
@@ -94,13 +90,13 @@ func pickModel(reader *bufio.Reader, models []string, defaultModel string) strin
 
 // ─── Генерация ────────────────────────────────────────────────────────────────
 
-// sendRequest отправляет запрос к Ollama и читает стриминговый ответ.
-// onChunk вызывается для каждого полученного токена (nil — для тихого режима).
-func sendRequest(baseURL, model, taskText string, onChunk func(string)) (string, error) {
+// sendRequest — базовая функция запроса к Ollama.
+// sysTpl — системный промпт; onChunk — коллбек на токен (nil = тихо).
+func sendRequest(baseURL, model, prompt, sysTpl string, onChunk func(string)) (string, error) {
 	reqData := OllamaRequest{
 		Model:  model,
-		Prompt: taskText,
-		System: systemPrompt,
+		Prompt: prompt,
+		System: sysTpl,
 		Stream: true,
 	}
 	jsonData, err := json.Marshal(reqData)
@@ -140,14 +136,9 @@ func sendRequest(baseURL, model, taskText string, onChunk func(string)) (string,
 	return result.String(), nil
 }
 
-// generate — тихая генерация (для пакетного режима)
-func generate(baseURL, model, taskText string) (string, error) {
-	return sendRequest(baseURL, model, taskText, nil)
-}
-
-// generateWithStream — генерация со стримингом токенов в stdout
-func generateWithStream(baseURL, model, taskText string) (string, error) {
-	return sendRequest(baseURL, model, taskText, func(token string) {
+// ollamaGenerateWithStream — генерация со стримингом в stdout (интерактивный режим).
+func ollamaGenerateWithStream(baseURL, model, prompt, sysTpl string) (string, error) {
+	return sendRequest(baseURL, model, prompt, sysTpl, func(token string) {
 		fmt.Print(token)
 	})
 }

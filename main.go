@@ -10,67 +10,174 @@ import (
 )
 
 func main() {
+	configFlag := flag.String("config", "config.json", "Путь к файлу конфигурации")
 	taskFlag := flag.String("task", "", "Тест-кейс (если не указано — интерактивный режим)")
-	tasksFileFlag := flag.String("tasks-file", "", "Файл со списком тест-кейсов (по одному на строку)")
-	modelFlag := flag.String("model", "mistral-small3.2:latest", "Имя модели Ollama")
-	outFlag := flag.String("out", "", "Файл для сохранения результата")
+	tasksFileFlag := flag.String("tasks-file", "", "Файл со списком тест-кейсов (.txt)")
+	casesFileFlag := flag.String("cases-file", "", "Файл тест-кейсов в JSON формате (.json)")
+	modelFlag := flag.String("model", "", "Имя модели (зависит от провайдера)")
+	providerFlag := flag.String("provider", "", "Провайдер LLM: ollama или gemini")
+	keyFlag := flag.String("key", "", "API ключ Gemini (или переменная GEMINI_API_KEY)")
+	outFlag := flag.String("out", "", "Файл для сохранения результата (одиночный режим)")
 	baseURL := flag.String("url", "http://localhost:11434", "Адрес Ollama")
-	noSave := flag.Bool("no-save", false, "Не сохранять в ./TestCasesTS/ автоматически")
+	noSave := flag.Bool("no-save", false, "Не сохранять файлы автоматически")
+	reviewFlag := flag.Bool("review", false, "Включить второй проход ревью (Generator→Reviewer)")
 	flag.Parse()
+
+	// ── Загрузка конфигурации ────────────────────────────────────────────────
+	var config Config
+	if cfg, err := loadConfig(*configFlag); err == nil {
+		config = *cfg
+	} else if !os.IsNotExist(err) {
+		fmt.Printf("\033[33m[WARN]\033[0m Ошибка чтения %s: %v\n", *configFlag, err)
+	} else {
+		fmt.Printf("\033[90m[INFO]\033[0m %s не найден, используются дефолтные настройки\033[0m\n", *configFlag)
+	}
+
+	setFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// Приоритет флагов над конфигом
+	if !setFlags["provider"] && config.Provider != "" {
+		*providerFlag = config.Provider
+	}
+	if !setFlags["key"] && config.GeminiAPIKey != "" {
+		*keyFlag = config.GeminiAPIKey
+	}
+	if !setFlags["url"] && config.OllamaURL != "" {
+		*baseURL = config.OllamaURL
+	}
+
+	// Итоговый системный промпт: конфиг или дефолт, с подстановкой {{context}}.
+	// Контекст приложения применяется ОДИН РАЗ — здесь, через {{context}}.
+	rawPrompt := config.SystemPrompt
+	if rawPrompt == "" {
+		rawPrompt = defaultSystemPrompt
+	}
+	resolvedSystemPrompt := applySystemPromptTemplate(rawPrompt, config.Context)
+
+	// MaxRetries: из конфига или константа-дефолт.
+	maxRetries := config.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = defaultMaxRetries
+	}
+
+	reviewMode := *reviewFlag || config.ReviewMode
 
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Println("\033[36m") // cyan
+	fmt.Println("\033[36m")
 	fmt.Println("   ██████╗ ██████╗ ███╗   ██╗██╗   ██╗███████╗██╗   ██╗ ██████╗ ██████╗ ")
 	fmt.Println("  ██╔════╝██╔═══██╗████╗  ██║██║   ██║██╔════╝╚██╗ ██╔╝██╔═══██╗██╔══██╗")
 	fmt.Println("  ██║     ██║   ██║██╔██╗ ██║██║   ██║█████╗   ╚████╔╝ ██║   ██║██████╔╝")
 	fmt.Println("  ██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝██╔══╝    ╚██╔╝  ██║   ██║██╔══██╗")
 	fmt.Println("  ╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝ ███████╗   ██║   ╚██████╔╝██║  ██║")
 	fmt.Println("   ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝  ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝")
-	fmt.Println("\033[33m        Playwright Test Generator\033[90m  v1.0.0\033[0m")
+	fmt.Println("\033[33m        Playwright Test Generator\033[90m  v1.1.0\033[0m")
 	fmt.Println()
 
-	// Проверка Ollama
-	fmt.Printf("[*] Проверяю подключение к Ollama (%s)...\n", *baseURL)
-	if err := checkOllama(*baseURL); err != nil {
-		fmt.Printf("\033[31m[ERR]\033[0m Ollama недоступна: %v\n", err)
-		fmt.Println("[TIP] Запусти сервер командой: ollama serve")
-		os.Exit(1)
-	}
-	fmt.Println("\033[32m[OK]\033[0m Ollama доступна.")
-
-	// Выбор модели
-	chosenModel := *modelFlag
-	modelExplicit := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "model" {
-			modelExplicit = true
-		}
-	})
-	if !modelExplicit {
-		models, err := fetchModels(*baseURL)
-		if err != nil {
-			fmt.Printf("\033[33m[WARN]\033[0m Не удалось получить список моделей: %v\n", err)
-		} else if len(models) == 0 {
-			fmt.Println("\033[33m[WARN]\033[0m Нет установленных моделей. Используется значение по умолчанию.")
+	// ── Выбор провайдера ─────────────────────────────────────────────────────
+	chosenProvider := *providerFlag
+	if chosenProvider == "" {
+		fmt.Println("Доступные провайдеры:")
+		fmt.Println("  1. ollama (локально)")
+		fmt.Println("  2. gemini (Google API)")
+		fmt.Print("\nВведи номер провайдера [по умолчанию: ollama]: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "2" || strings.ToLower(input) == "gemini" {
+			chosenProvider = "gemini"
 		} else {
-			chosenModel = pickModel(reader, models, chosenModel)
+			chosenProvider = "ollama"
+		}
+	}
+	chosenProvider = strings.ToLower(chosenProvider)
+
+	var chosenModel string
+	var apiKey string
+
+	if chosenProvider == "gemini" {
+		apiKey = *keyFlag
+		if apiKey == "" {
+			apiKey = os.Getenv("GEMINI_API_KEY")
+		}
+		if apiKey == "" {
+			fmt.Println("\033[31m[ERR]\033[0m Не задан API ключ (флаг -key или переменная GEMINI_API_KEY)")
+			os.Exit(1)
+		}
+		if setFlags["model"] {
+			chosenModel = *modelFlag
+		} else if config.GeminiModel != "" {
+			chosenModel = config.GeminiModel
+		} else {
+			chosenModel = "gemini-2.5-flash"
+		}
+		fmt.Println("\033[32m[OK]\033[0m Gemini API.")
+	} else {
+		fmt.Printf("[*] Проверяю подключение к Ollama (%s)...\n", *baseURL)
+		if err := checkOllama(*baseURL); err != nil {
+			fmt.Printf("\033[31m[ERR]\033[0m Ollama недоступна: %v\n", err)
+			fmt.Println("[TIP] Запусти сервер: ollama serve")
+			os.Exit(1)
+		}
+		fmt.Println("\033[32m[OK]\033[0m Ollama доступна.")
+
+		chosenModel = "mistral-small3.2:latest"
+		if config.OllamaModel != "" {
+			chosenModel = config.OllamaModel
+		}
+		if setFlags["model"] {
+			chosenModel = *modelFlag
+		} else {
+			models, err := fetchModels(*baseURL)
+			if err != nil {
+				fmt.Printf("\033[33m[WARN]\033[0m Не удалось получить список моделей: %v\n", err)
+			} else if len(models) == 0 {
+				fmt.Println("\033[33m[WARN]\033[0m Нет установленных моделей.")
+			} else {
+				chosenModel = pickModel(reader, models, chosenModel)
+			}
 		}
 	}
 
-	// ── Пакетный режим ───────────────────────────────────────────────────────
+	batchCfg := BatchConfig{
+		Provider:     chosenProvider,
+		APIKey:       apiKey,
+		BaseURL:      *baseURL,
+		Model:        chosenModel,
+		SystemPrompt: resolvedSystemPrompt,
+		NoSave:       *noSave,
+		ReviewMode:   reviewMode,
+		MaxRetries:   maxRetries,
+	}
+
+	// ── JSON cases режим ──────────────────────────────────────────────────────
+	if *casesFileFlag != "" {
+		cases, err := loadCasesJSON(*casesFileFlag)
+		if err != nil {
+			fmt.Printf("\033[31m[ERR]\033[0m %v\n", err)
+			os.Exit(1)
+		}
+		runBatchCases(batchCfg, cases)
+		return
+	}
+
+	// ── Пакетный txt режим ────────────────────────────────────────────────────
 	if *tasksFileFlag != "" {
 		tasks, err := loadTasksFile(*tasksFileFlag)
 		if err != nil {
-			fmt.Printf("\033[31m[ERR]\033[0m Не удалось загрузить файл задач: %v\n", err)
+			fmt.Printf("\033[31m[ERR]\033[0m %v\n", err)
 			os.Exit(1)
 		}
-		runBatch(*baseURL, chosenModel, tasks, *noSave)
+		runBatch(batchCfg, tasks)
 		return
 	}
 
 	// ── Одиночный / интерактивный режим ──────────────────────────────────────
-	fmt.Printf("\n[MODEL] %s\n", chosenModel)
+	fmt.Printf("\n[MODEL] %s  [PROVIDER] %s", chosenModel, chosenProvider)
+	if reviewMode {
+		fmt.Print("  [REVIEW] on")
+	}
+	fmt.Println()
 
 	singleRun := *taskFlag != ""
 
@@ -83,7 +190,6 @@ func main() {
 			fmt.Print("\n> Тест-кейс (или 'q' для выхода): ")
 			input, _ := reader.ReadString('\n')
 			taskText = strings.TrimSpace(input)
-
 			switch taskText {
 			case "":
 				fmt.Println("\033[33m[WARN]\033[0m Пустой ввод, попробуй снова.")
@@ -94,10 +200,20 @@ func main() {
 			}
 		}
 
+		// Контекст уже встроен в системный промпт — передаём только задачу.
+		userPrompt := buildSimplePrompt(taskText)
+
 		fmt.Printf("\n[...] Генерирую тест...\n\n")
 		start := time.Now()
 
-		content, err := generateWithStream(*baseURL, chosenModel, taskText)
+		var content string
+		var err error
+
+		if chosenProvider == "gemini" {
+			content, err = geminiGenerateWithStream(apiKey, chosenModel, userPrompt, resolvedSystemPrompt)
+		} else {
+			content, err = ollamaGenerateWithStream(*baseURL, chosenModel, userPrompt, resolvedSystemPrompt)
+		}
 		if err != nil {
 			fmt.Printf("\033[31m[ERR]\033[0m %v\n", err)
 			if singleRun {
@@ -106,14 +222,36 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("\n\n\033[32m[OK]\033[0m Готово за %.1f сек.\n", time.Since(start).Seconds())
+		content = cleanCodeBlock(content)
+
+		if valErr := validateContent(content); valErr != nil {
+			fmt.Printf("\033[33m[WARN]\033[0m %v\n", valErr)
+		}
+
+		if reviewMode {
+			fmt.Printf("\n[»] Запускаю ревью...\n")
+			reviewed, revErr := doReview(batchCfg, buildReviewPrompt(userPrompt, content))
+			if revErr == nil {
+				reviewed = cleanCodeBlock(reviewed)
+				if validateContent(reviewed) == nil {
+					content = reviewed
+					fmt.Printf("\033[36m[»]\033[0m Ревью применено.\n")
+				} else {
+					fmt.Printf("\033[33m[WARN]\033[0m Ревью вернуло невалидный результат, используется оригинал.\n")
+				}
+			} else {
+				fmt.Printf("\033[33m[WARN]\033[0m Ревью не удалось: %v\n", revErr)
+			}
+		}
+
+		fmt.Printf("\n\033[32m[OK]\033[0m Готово за %.1f сек.\n", time.Since(start).Seconds())
 
 		switch {
 		case *outFlag != "":
 			if err := saveResult(*outFlag, content); err != nil {
 				fmt.Printf("\033[31m[ERR]\033[0m Не удалось сохранить: %v\n", err)
 			} else {
-				fmt.Printf("\033[32m[SAVE]\033[0m Тест сохранён: %s\n", *outFlag)
+				fmt.Printf("\033[32m[SAVE]\033[0m %s\n", *outFlag)
 			}
 		case !*noSave:
 			path := autoSavePath(taskText)

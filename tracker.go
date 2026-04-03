@@ -13,11 +13,12 @@ import (
 type TodoStatus int
 
 const (
-	StatusPending TodoStatus = iota
-	StatusRunning
+	StatusPending   TodoStatus = iota
+	StatusRunning              // идёт генерация
+	StatusReviewing            // идёт второй проход ревью
 	StatusDone
 	StatusFailed
-	StatusSkipped
+	StatusSkipped // зарезервировано для будущего использования
 )
 
 func (s TodoStatus) icon() string {
@@ -26,6 +27,8 @@ func (s TodoStatus) icon() string {
 		return "\033[90m[ ]\033[0m"
 	case StatusRunning:
 		return "\033[33m[~]\033[0m"
+	case StatusReviewing:
+		return "\033[36m[»]\033[0m"
 	case StatusDone:
 		return "\033[32m[+]\033[0m"
 	case StatusFailed:
@@ -42,6 +45,8 @@ func (s TodoStatus) label() string {
 		return "ожидает"
 	case StatusRunning:
 		return "генерация..."
+	case StatusReviewing:
+		return "ревью..."
 	case StatusDone:
 		return "готово"
 	case StatusFailed:
@@ -55,11 +60,13 @@ func (s TodoStatus) label() string {
 // ─── Элемент и список ─────────────────────────────────────────────────────────
 
 type TodoItem struct {
-	Task      string
+	Name      string     // короткое имя для отображения в трекере
+	Task      string     // полный текст задачи для промпта
 	Status    TodoStatus
 	Elapsed   time.Duration
 	SavedPath string
 	Error     string
+	Retries   int // количество выполненных retry
 }
 
 type TodoList struct {
@@ -72,7 +79,19 @@ type TodoList struct {
 func NewTodoList(tasks []string) *TodoList {
 	items := make([]*TodoItem, len(tasks))
 	for i, t := range tasks {
-		items[i] = &TodoItem{Task: t, Status: StatusPending}
+		items[i] = &TodoItem{Name: t, Task: t, Status: StatusPending}
+	}
+	return &TodoList{Items: items, startTime: time.Now()}
+}
+
+func NewTodoListFromCases(cases []TestCase) *TodoList {
+	items := make([]*TodoItem, len(cases))
+	for i, tc := range cases {
+		items[i] = &TodoItem{
+			Name:   fmt.Sprintf("[%s] %s", tc.Section, tc.Name),
+			Task:   tc.Task,
+			Status: StatusPending,
+		}
 	}
 	return &TodoList{Items: items, startTime: time.Now()}
 }
@@ -97,7 +116,6 @@ func progressBar(done, total, width int) string {
 	return fmt.Sprintf("[%s] %d/%d (%d%%)", bar, done, total, pct)
 }
 
-// renderUnsafe выполняет отрисовку (вызывать под мьютексом)
 func (tl *TodoList) renderUnsafe() {
 	if tl.rendered > 0 {
 		fmt.Printf("\033[%dA", tl.rendered)
@@ -132,31 +150,47 @@ func (tl *TodoList) renderUnsafe() {
 	lines++
 
 	for i, item := range tl.Items {
-		taskLabel := truncate(item.Task, 55)
+		label := truncate(item.Name, 52)
 
 		switch item.Status {
 		case StatusPending:
-			fmt.Printf("  %s  %d. %s\n", item.Status.icon(), i+1, taskLabel)
+			fmt.Printf("  %s  %d. %s\n", item.Status.icon(), i+1, label)
+
 		case StatusRunning:
-			fmt.Printf("  \033[33m%s\033[0m  %d. \033[33m%s\033[0m  [%s]\n",
-				item.Status.icon(), i+1, taskLabel, item.Status.label())
+			retryInfo := ""
+			if item.Retries > 0 {
+				retryInfo = fmt.Sprintf(" retry %d", item.Retries)
+			}
+			fmt.Printf("  %s  %d. \033[33m%s\033[0m  \033[90m[%s%s]\033[0m\n",
+				item.Status.icon(), i+1, label, item.Status.label(), retryInfo)
+
+		case StatusReviewing:
+			fmt.Printf("  %s  %d. \033[36m%s\033[0m  \033[90m[%s]\033[0m\n",
+				item.Status.icon(), i+1, label, item.Status.label())
+
 		case StatusDone:
 			savedInfo := ""
 			if item.SavedPath != "" {
 				savedInfo = "  → " + filepath.Base(item.SavedPath)
 			}
-			fmt.Printf("  %s  %d. %s  \033[90m%.1fs%s\033[0m\n",
-				item.Status.icon(), i+1, taskLabel, item.Elapsed.Seconds(), savedInfo)
+			retryInfo := ""
+			if item.Retries > 0 {
+				retryInfo = fmt.Sprintf(" (%d retry)", item.Retries)
+			}
+			fmt.Printf("  %s  %d. %s  \033[90m%.1fs%s%s\033[0m\n",
+				item.Status.icon(), i+1, label, item.Elapsed.Seconds(), savedInfo, retryInfo)
+
 		case StatusFailed:
 			errInfo := ""
 			if item.Error != "" {
-				errInfo = "  (" + truncate(item.Error, 30) + ")"
+				errInfo = "  (" + truncate(item.Error, 35) + ")"
 			}
 			fmt.Printf("  %s  %d. \033[31m%s\033[0m\033[90m%s\033[0m\n",
-				item.Status.icon(), i+1, taskLabel, errInfo)
+				item.Status.icon(), i+1, label, errInfo)
+
 		case StatusSkipped:
 			fmt.Printf("  %s  %d. \033[90m%s\033[0m\n",
-				item.Status.icon(), i+1, taskLabel)
+				item.Status.icon(), i+1, label)
 		}
 		lines++
 	}
@@ -167,47 +201,47 @@ func (tl *TodoList) renderUnsafe() {
 	tl.rendered = lines
 }
 
-// Render — потокобезопасная отрисовка
 func (tl *TodoList) Render() {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.renderUnsafe()
 }
 
-// SetStatus обновляет статус и перерисовывает список
 func (tl *TodoList) SetStatus(idx int, status TodoStatus, opts ...string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	item := tl.Items[idx]
 	item.Status = status
-	if status == StatusDone || status == StatusFailed {
-		if len(opts) > 0 {
-			if status == StatusDone {
-				item.SavedPath = opts[0]
-			} else {
-				item.Error = opts[0]
-			}
-		}
+	if status == StatusDone && len(opts) > 0 {
+		item.SavedPath = opts[0]
+	} else if status == StatusFailed && len(opts) > 0 {
+		item.Error = opts[0]
 	}
 	tl.renderUnsafe()
 }
 
-// SetElapsed фиксирует время выполнения задачи
+func (tl *TodoList) SetRetry(idx, count int) {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	tl.Items[idx].Retries = count
+	tl.renderUnsafe()
+}
+
 func (tl *TodoList) SetElapsed(idx int, d time.Duration) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.Items[idx].Elapsed = d
 }
 
-// Summary печатает итоговую сводку
 func (tl *TodoList) Summary() {
-	done, failed, skipped := 0, 0, 0
+	done, failed, skipped, totalRetries := 0, 0, 0, 0
 	var totalElapsed time.Duration
 	for _, item := range tl.Items {
 		switch item.Status {
 		case StatusDone:
 			done++
 			totalElapsed += item.Elapsed
+			totalRetries += item.Retries
 		case StatusFailed:
 			failed++
 		case StatusSkipped:
@@ -226,6 +260,9 @@ func (tl *TodoList) Summary() {
 	}
 	if skipped > 0 {
 		fmt.Printf("  \033[90mПропущено:\033[0m  %d\n", skipped)
+	}
+	if totalRetries > 0 {
+		fmt.Printf("  Retry:        %d\n", totalRetries)
 	}
 	fmt.Printf("  Время генерации:  %s\n", totalElapsed.Round(time.Second))
 	fmt.Printf("  Время сессии:     %s\n", sessionElapsed)
