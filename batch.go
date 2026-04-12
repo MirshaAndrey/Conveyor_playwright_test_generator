@@ -21,27 +21,39 @@ type BatchConfig struct {
 }
 
 // IsGemini возвращает true если активный провайдер — Google Gemini.
-// Используется для rate limiting и выбора API.
 func (c BatchConfig) IsGemini() bool {
 	return c.Provider == "gemini"
+}
+
+// IsClaude возвращает true если активный провайдер — Anthropic Claude.
+func (c BatchConfig) IsClaude() bool {
+	return c.Provider == "claude"
 }
 
 // ─── Вспомогательные функции генерации ───────────────────────────────────────
 
 // doGenerate вызывает нужный провайдер тихо (без стриминга).
 func doGenerate(cfg BatchConfig, prompt string) (string, error) {
-	if cfg.IsGemini() {
+	switch {
+	case cfg.IsGemini():
 		return sendGeminiRequest(cfg.APIKey, cfg.Model, prompt, cfg.SystemPrompt, false, nil)
+	case cfg.IsClaude():
+		return sendClaudeRequest(cfg.APIKey, cfg.Model, prompt, cfg.SystemPrompt, false, nil)
+	default:
+		return sendRequest(cfg.BaseURL, cfg.Model, prompt, cfg.SystemPrompt, nil)
 	}
-	return sendRequest(cfg.BaseURL, cfg.Model, prompt, cfg.SystemPrompt, nil)
 }
 
 // doReview вызывает провайдер для второго прохода ревью.
 func doReview(cfg BatchConfig, reviewPrompt string) (string, error) {
-	if cfg.IsGemini() {
+	switch {
+	case cfg.IsGemini():
 		return sendGeminiRequest(cfg.APIKey, cfg.Model, reviewPrompt, reviewSystemPrompt, false, nil)
+	case cfg.IsClaude():
+		return sendClaudeRequest(cfg.APIKey, cfg.Model, reviewPrompt, reviewSystemPrompt, false, nil)
+	default:
+		return sendRequest(cfg.BaseURL, cfg.Model, reviewPrompt, reviewSystemPrompt, nil)
 	}
-	return sendRequest(cfg.BaseURL, cfg.Model, reviewPrompt, reviewSystemPrompt, nil)
 }
 
 // rateLimitIfNeeded делает паузу между запросами Gemini (бесплатный тариф).

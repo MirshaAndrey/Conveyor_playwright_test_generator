@@ -12,6 +12,8 @@ type Config struct {
 	GeminiModel  string `json:"gemini_model"`
 	OllamaURL    string `json:"ollama_url"`
 	OllamaModel  string `json:"ollama_model"`
+	ClaudeAPIKey string `json:"claude_api_key"`
+	ClaudeModel  string `json:"claude_model"`
 	// SystemPrompt переопределяет встроенный промпт. Поддерживает плейсхолдер {{context}}.
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	// Context подставляется в {{context}} системного промпта.

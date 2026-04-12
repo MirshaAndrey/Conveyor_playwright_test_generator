@@ -102,6 +102,7 @@ func taskToSlug(task string) string {
 
 // TestCase — один тест-кейс из cases.json
 type TestCase struct {
+	URL        string `json:"url"`         // URL страницы для автосканирования селекторов
 	Section    string `json:"section"`     // группа/модуль: "auth", "cart"
 	Name       string `json:"name"`        // короткое имя для трекера и slug файла
 	Task       string `json:"task"`        // полный текст задачи, уходит в промпт

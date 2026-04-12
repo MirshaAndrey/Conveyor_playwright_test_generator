@@ -14,21 +14,30 @@ type TodoStatus int
 
 const (
 	StatusPending   TodoStatus = iota
-	StatusRunning              // идёт генерация
-	StatusReviewing            // идёт второй проход ревью
+	StatusScanning             // сканирование страницы
+	StatusRunning              // генерация теста
+	StatusReviewing            // второй проход ревью
+	StatusTesting              // запуск теста через Playwright
+	StatusFixing               // LLM исправляет ошибку теста
 	StatusDone
 	StatusFailed
-	StatusSkipped // зарезервировано для будущего использования
+	StatusSkipped // зарезервировано
 )
 
 func (s TodoStatus) icon() string {
 	switch s {
 	case StatusPending:
 		return "\033[90m[ ]\033[0m"
+	case StatusScanning:
+		return "\033[35m[⊕]\033[0m"
 	case StatusRunning:
 		return "\033[33m[~]\033[0m"
 	case StatusReviewing:
 		return "\033[36m[»]\033[0m"
+	case StatusTesting:
+		return "\033[34m[►]\033[0m"
+	case StatusFixing:
+		return "\033[33m[↻]\033[0m"
 	case StatusDone:
 		return "\033[32m[+]\033[0m"
 	case StatusFailed:
@@ -43,10 +52,16 @@ func (s TodoStatus) label() string {
 	switch s {
 	case StatusPending:
 		return "ожидает"
+	case StatusScanning:
+		return "сканирование..."
 	case StatusRunning:
 		return "генерация..."
 	case StatusReviewing:
 		return "ревью..."
+	case StatusTesting:
+		return "запуск теста..."
+	case StatusFixing:
+		return "исправление..."
 	case StatusDone:
 		return "готово"
 	case StatusFailed:
@@ -66,7 +81,9 @@ type TodoItem struct {
 	Elapsed   time.Duration
 	SavedPath string
 	Error     string
-	Retries   int // количество выполненных retry
+	Retries   int    // количество retry при валидации
+	FixHint   string // суффикс для StatusFixing: "2/3"
+	FixCount  int    // сколько fix-итераций потребовалось
 }
 
 type TodoList struct {
@@ -156,6 +173,10 @@ func (tl *TodoList) renderUnsafe() {
 		case StatusPending:
 			fmt.Printf("  %s  %d. %s\n", item.Status.icon(), i+1, label)
 
+		case StatusScanning:
+			fmt.Printf("  %s  %d. \033[35m%s\033[0m  \033[90m[%s]\033[0m\n",
+				item.Status.icon(), i+1, label, item.Status.label())
+
 		case StatusRunning:
 			retryInfo := ""
 			if item.Retries > 0 {
@@ -167,6 +188,14 @@ func (tl *TodoList) renderUnsafe() {
 		case StatusReviewing:
 			fmt.Printf("  %s  %d. \033[36m%s\033[0m  \033[90m[%s]\033[0m\n",
 				item.Status.icon(), i+1, label, item.Status.label())
+
+		case StatusTesting:
+			fmt.Printf("  %s  %d. \033[34m%s\033[0m  \033[90m[%s]\033[0m\n",
+				item.Status.icon(), i+1, label, item.Status.label())
+
+		case StatusFixing:
+			fmt.Printf("  %s  %d. \033[33m%s\033[0m  \033[90m[%s %s]\033[0m\n",
+				item.Status.icon(), i+1, label, item.Status.label(), item.FixHint)
 
 		case StatusDone:
 			savedInfo := ""
@@ -234,7 +263,7 @@ func (tl *TodoList) SetElapsed(idx int, d time.Duration) {
 }
 
 func (tl *TodoList) Summary() {
-	done, failed, skipped, totalRetries := 0, 0, 0, 0
+	done, failed, skipped, totalRetries, totalFixes := 0, 0, 0, 0, 0
 	var totalElapsed time.Duration
 	for _, item := range tl.Items {
 		switch item.Status {
@@ -242,6 +271,7 @@ func (tl *TodoList) Summary() {
 			done++
 			totalElapsed += item.Elapsed
 			totalRetries += item.Retries
+			totalFixes += item.FixCount
 		case StatusFailed:
 			failed++
 		case StatusSkipped:
@@ -262,9 +292,23 @@ func (tl *TodoList) Summary() {
 		fmt.Printf("  \033[90mПропущено:\033[0m  %d\n", skipped)
 	}
 	if totalRetries > 0 {
-		fmt.Printf("  Retry:        %d\n", totalRetries)
+		fmt.Printf("  Retry (валид.):  %d\n", totalRetries)
+	}
+	if totalFixes > 0 {
+		fmt.Printf("  Fix (playwright): %d\n", totalFixes)
 	}
 	fmt.Printf("  Время генерации:  %s\n", totalElapsed.Round(time.Second))
 	fmt.Printf("  Время сессии:     %s\n", sessionElapsed)
 	fmt.Println("══════════════════════════════════════")
+}
+
+// SetSubStatus обновляет статус без полного ре-рендера метки — для fix-loop.
+// hint отображается как суффикс: "[↻] исправление... 2/3"
+func (tl *TodoList) SetFixStatus(idx, attempt, maxAttempts int) {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	item := tl.Items[idx]
+	item.Status = StatusFixing
+	item.FixHint = fmt.Sprintf("%d/%d", attempt, maxAttempts)
+	tl.renderUnsafe()
 }

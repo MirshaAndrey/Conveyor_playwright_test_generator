@@ -21,6 +21,11 @@ func main() {
 	baseURL := flag.String("url", "http://localhost:11434", "Адрес Ollama")
 	noSave := flag.Bool("no-save", false, "Не сохранять файлы автоматически")
 	reviewFlag := flag.Bool("review", false, "Включить второй проход ревью (Generator→Reviewer)")
+	scanURL := flag.String("scan-url", "", "URL для сканирования data-testid/aria-label через Playwright (headless)")
+	agentFlag := flag.Bool("agent", false, "Агентный режим: scan→generate→review→run→fix")
+	maxFixFlag := flag.Int("max-fix", 3, "Агентный режим: максимум попыток исправления упавшего теста")
+	noRunFlag := flag.Bool("no-run", false, "Агентный режим: не запускать тесты (только генерация)")
+	pomFlag := flag.Bool("pom", false, "Агентный режим: post-batch POM рефакторинг после всех кейсов")
 	flag.Parse()
 
 	// ── Загрузка конфигурации ────────────────────────────────────────────────
@@ -43,17 +48,39 @@ func main() {
 	if !setFlags["key"] && config.GeminiAPIKey != "" {
 		*keyFlag = config.GeminiAPIKey
 	}
+	if !setFlags["key"] && config.ClaudeAPIKey != "" {
+		*keyFlag = config.ClaudeAPIKey
+	}
 	if !setFlags["url"] && config.OllamaURL != "" {
 		*baseURL = config.OllamaURL
 	}
 
+	// ── Сканирование страницы (если указан -scan-url) ────────────────────────
+	var scanContext string
+	if *scanURL != "" {
+		scanResult, err := runScanner(*scanURL)
+		if err != nil {
+			fmt.Printf("\033[31m[ERR]\033[0m Сканирование не удалось: %v\n", err)
+			os.Exit(1)
+		}
+		scanContext = formatScanContext(scanResult)
+	}
+
 	// Итоговый системный промпт: конфиг или дефолт, с подстановкой {{context}}.
 	// Контекст приложения применяется ОДИН РАЗ — здесь, через {{context}}.
+	// Если есть результат сканирования — он добавляется к ручному контексту.
 	rawPrompt := config.SystemPrompt
 	if rawPrompt == "" {
 		rawPrompt = defaultSystemPrompt
 	}
-	resolvedSystemPrompt := applySystemPromptTemplate(rawPrompt, config.Context)
+	finalContext := config.Context
+	if scanContext != "" {
+		if finalContext != "" {
+			finalContext += "\n\n"
+		}
+		finalContext += scanContext
+	}
+	resolvedSystemPrompt := applySystemPromptTemplate(rawPrompt, finalContext)
 
 	// MaxRetries: из конфига или константа-дефолт.
 	maxRetries := config.MaxRetries
@@ -66,13 +93,7 @@ func main() {
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println("\033[36m")
-	fmt.Println("   ██████╗ ██████╗ ███╗   ██╗██╗   ██╗███████╗██╗   ██╗ ██████╗ ██████╗ ")
-	fmt.Println("  ██╔════╝██╔═══██╗████╗  ██║██║   ██║██╔════╝╚██╗ ██╔╝██╔═══██╗██╔══██╗")
-	fmt.Println("  ██║     ██║   ██║██╔██╗ ██║██║   ██║█████╗   ╚████╔╝ ██║   ██║██████╔╝")
-	fmt.Println("  ██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝██╔══╝    ╚██╔╝  ██║   ██║██╔══██╗")
-	fmt.Println("  ╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝ ███████╗   ██║   ╚██████╔╝██║  ██║")
-	fmt.Println("   ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝  ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝")
-	fmt.Println("\033[33m        Playwright Test Generator\033[90m  v1.1.0\033[0m")
+	fmt.Println("\033[33m   CONVEYOR Playwright Test Generator\033[90m  v1.1.0\033[0m")
 	fmt.Println()
 
 	// ── Выбор провайдера ─────────────────────────────────────────────────────
@@ -81,12 +102,16 @@ func main() {
 		fmt.Println("Доступные провайдеры:")
 		fmt.Println("  1. ollama (локально)")
 		fmt.Println("  2. gemini (Google API)")
+		fmt.Println("  3. claude (Anthropic API)")
 		fmt.Print("\nВведи номер провайдера [по умолчанию: ollama]: ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
-		if input == "2" || strings.ToLower(input) == "gemini" {
+		switch {
+		case input == "2" || strings.ToLower(input) == "gemini":
 			chosenProvider = "gemini"
-		} else {
+		case input == "3" || strings.ToLower(input) == "claude":
+			chosenProvider = "claude"
+		default:
 			chosenProvider = "ollama"
 		}
 	}
@@ -95,7 +120,8 @@ func main() {
 	var chosenModel string
 	var apiKey string
 
-	if chosenProvider == "gemini" {
+	switch chosenProvider {
+	case "gemini":
 		apiKey = *keyFlag
 		if apiKey == "" {
 			apiKey = os.Getenv("GEMINI_API_KEY")
@@ -112,7 +138,26 @@ func main() {
 			chosenModel = "gemini-2.5-flash"
 		}
 		fmt.Println("\033[32m[OK]\033[0m Gemini API.")
-	} else {
+
+	case "claude":
+		apiKey = *keyFlag
+		if apiKey == "" {
+			apiKey = os.Getenv("ANTHROPIC_API_KEY")
+		}
+		if apiKey == "" {
+			fmt.Println("\033[31m[ERR]\033[0m Не задан API ключ (флаг -key или переменная ANTHROPIC_API_KEY)")
+			os.Exit(1)
+		}
+		if setFlags["model"] {
+			chosenModel = *modelFlag
+		} else if config.ClaudeModel != "" {
+			chosenModel = config.ClaudeModel
+		} else {
+			chosenModel = pickModel(reader, claudeModels, claudeDefaultModel)
+		}
+		fmt.Println("\033[32m[OK]\033[0m Claude API.")
+
+	default: // ollama
 		fmt.Printf("[*] Проверяю подключение к Ollama (%s)...\n", *baseURL)
 		if err := checkOllama(*baseURL); err != nil {
 			fmt.Printf("\033[31m[ERR]\033[0m Ollama недоступна: %v\n", err)
@@ -148,6 +193,27 @@ func main() {
 		NoSave:       *noSave,
 		ReviewMode:   reviewMode,
 		MaxRetries:   maxRetries,
+	}
+
+	// ── Агентный режим ──────────────────────────────────────────────────────
+	if *agentFlag {
+		if *casesFileFlag == "" {
+			fmt.Println("\033[31m[ERR]\033[0m Агентный режим требует -cases-file")
+			os.Exit(1)
+		}
+		cases, err := loadCasesJSON(*casesFileFlag)
+		if err != nil {
+			fmt.Printf("\033[31m[ERR]\033[0m %v\n", err)
+			os.Exit(1)
+		}
+		agentCfg := AgentConfig{
+			BatchConfig:    batchCfg,
+			MaxFixAttempts: *maxFixFlag,
+			NoRun:          *noRunFlag,
+			POMRefactor:    *pomFlag,
+		}
+		runAgent(agentCfg, cases)
+		return
 	}
 
 	// ── JSON cases режим ──────────────────────────────────────────────────────
@@ -209,9 +275,12 @@ func main() {
 		var content string
 		var err error
 
-		if chosenProvider == "gemini" {
+		switch chosenProvider {
+		case "gemini":
 			content, err = geminiGenerateWithStream(apiKey, chosenModel, userPrompt, resolvedSystemPrompt)
-		} else {
+		case "claude":
+			content, err = claudeGenerateWithStream(apiKey, chosenModel, userPrompt, resolvedSystemPrompt)
+		default:
 			content, err = ollamaGenerateWithStream(*baseURL, chosenModel, userPrompt, resolvedSystemPrompt)
 		}
 		if err != nil {
